@@ -3,7 +3,7 @@ const { MongoClient } = require('mongodb');
 
 const app = express();
 
-// FIXED: Added type: '*/*' to capture the compressed Roblox string block regardless of what Content-Type Roblox sends
+// Parse any incoming payload format from Roblox without filtering
 app.use(express.text({ type: '*/*', limit: '10mb' })); 
 
 const mongoUri = process.env.MONGO_URI;
@@ -15,7 +15,6 @@ if (!mongoUri) {
 const client = new MongoClient(mongoUri);
 let db, savesCollection;
 
-// Connect to MongoDB Atlas
 async function connectDB() {
     try {
         await client.connect();
@@ -28,17 +27,15 @@ async function connectDB() {
 }
 connectDB();
 
-// Root route handler for Roblox HttpService requests
 app.post('/', async (req, res) => {
     const action = req.headers['action'];
     const containerRaw = req.headers['container'];
 
-    // 1. Handle Ping Action (System Check)
+    // 1. Handle Ping Action
     if (action === 'ping') {
         return res.status(200).json({ response: true, message: "pong" });
     }
 
-    // Validation check for Save/Get actions
     if (!containerRaw) {
         return res.status(400).send("Missing container header");
     }
@@ -63,23 +60,34 @@ app.post('/', async (req, res) => {
         try {
             const playerData = await savesCollection.findOne({ _id: userId });
             if (playerData && playerData.encodedSave) {
+                // Return data wrapped exactly how your unedited Luau script expects it
                 return res.json({ response: true, data: playerData.encodedSave });
             } else {
                 return res.json({ response: false });
             }
         } catch (error) {
-            console.error("Database query read failed:", error);
+            console.error("Database read failed:", error);
             return res.status(500).json({ response: false, error: "Internal read error" });
         }
     }
 
     // 3. Handle Save Data Action
     if (action === 'save') {
-        const encodedSaveData = req.body; // Captured raw text payload string block
+        let encodedSaveData = req.body;
         
         if (!encodedSaveData || encodedSaveData.trim() === "") {
             console.error("Save failed: Payload body was empty!");
             return res.status(400).send("Empty payload body");
+        }
+
+        // FIXED: If Luau wrapped the data in extra JSON quotes, parse it back to a clean string
+        if (encodedSaveData.startsWith('"') && encodedSaveData.endsWith('"')) {
+            try {
+                encodedSaveData = JSON.parse(encodedSaveData);
+            } catch (e) {
+                // Fallback to manual string trimming if JSON format is complex
+                encodedSaveData = encodedSaveData.slice(1, -1);
+            }
         }
 
         try {
@@ -91,7 +99,7 @@ app.post('/', async (req, res) => {
             console.log(`Successfully saved data document for user: ${userId}`);
             return res.json({ response: true });
         } catch (error) {
-            console.error("Database upsert update failed:", error);
+            console.error("Database update failed:", error);
             return res.status(500).json({ response: false, error: "Internal save error" });
         }
     }
