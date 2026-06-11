@@ -1,9 +1,10 @@
 const express = require('express');
 const { MongoClient } = require('mongodb');
+const zlib = require('zlib'); // Import the built-in decompression module
 
 const app = express();
 
-// FORCE EXPRESS TO READ EVERYTHING AS RAW UNFILTERED TEXT
+// Force Express to read everything as raw unfiltered text
 app.use((req, res, next) => {
     let data = '';
     req.setEncoding('utf8');
@@ -41,7 +42,6 @@ app.post('/', async (req, res) => {
 
     // 1. Handle Ping Action
     if (action === 'ping') {
-        // Must send back a string status so Luau's PostAsync pcall registers true
         return res.status(200).send(JSON.stringify({ response: true, message: "pong" }));
     }
 
@@ -54,11 +54,19 @@ app.post('/', async (req, res) => {
         if (containerRaw.startsWith("{")) {
             userId = JSON.parse(containerRaw).user;
         } else {
-            const decoded = Buffer.from(containerRaw, 'base64').toString('utf8');
-            const cleanJson = decoded.substring(decoded.indexOf('{'), decoded.lastIndexOf('}') + 1);
-            userId = JSON.parse(cleanJson).user;
+            // Decode Base64, then inflate the Zlib compressed buffer
+            const compressedBuffer = Buffer.from(containerRaw, 'base64');
+            let decompressed;
+            try {
+                decompressed = zlib.inflateSync(compressedBuffer).toString('utf8');
+            } catch (err) {
+                // Fallback to raw inflate if the standard Zlib header is missing
+                decompressed = zlib.inflateRawSync(compressedBuffer).toString('utf8');
+            }
+            userId = JSON.parse(decompressed).user;
         }
     } catch(e) {
+        console.error("Container parsing error:", e);
         return res.status(400).send("Invalid container data structure");
     }
 
@@ -69,7 +77,6 @@ app.post('/', async (req, res) => {
         try {
             const playerData = await savesCollection.findOne({ _id: userId });
             if (playerData && playerData.encodedSave) {
-                // Returns a clean string payload block back to Luau
                 return res.status(200).send(JSON.stringify({ response: true, data: playerData.encodedSave }));
             } else {
                 return res.status(200).send(JSON.stringify({ response: false }));
@@ -89,7 +96,7 @@ app.post('/', async (req, res) => {
             return res.status(400).send("Empty payload body");
         }
 
-        // Clean extra escaping JSON quotes injected by your unedited Luau script
+        // Clean extra escaping JSON quotes injected by your Luau script
         if (encodedSaveData.startsWith('"') && encodedSaveData.endsWith('"')) {
             try {
                 encodedSaveData = JSON.parse(encodedSaveData);
@@ -105,8 +112,6 @@ app.post('/', async (req, res) => {
                 { upsert: true }
             );
             console.log(`Successfully saved data document for user: ${userId}`);
-            
-            // Your Luau code validates a successful transmission by decoding the data response string!
             return res.status(200).send(JSON.stringify({ response: true }));
         } catch (error) {
             console.error("Database update failed:", error);
