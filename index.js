@@ -4,7 +4,7 @@ const zlib = require('zlib');
 
 const app = express();
 
-// Force Express to read everything as raw unfiltered text
+// Force Express to read incoming streams as raw text to prevent JSON parse errors
 app.use((req, res, next) => {
     let data = '';
     req.setEncoding('utf8');
@@ -36,31 +36,50 @@ async function connectDB() {
 }
 connectDB();
 
-// Default safe template to merge into incoming data
+// Default safe template matching your Player module precisely
 const defaultTemplate = {
+    upload: 0,
     shards: 0,
     cash: 0,
     bank: 0,
+    reputation: 0,
     level: 1,
     xp: 0,
-    reputation: 0,
+    traits: {
+        boons: [], 
+        flaws: []  
+    },
+    skins: [],     
     attributes: {
         strength: 0,
         endurance: 0,
         agility: 0,
         altruism: 0
     },
-    traits: {
-        boons: {},
-        flaws: {}
-    },
-    equipped_emotes: {},
-    owned_emotes: {},
-    skins: []
+    equipped_emotes: {}, 
+    owned_emotes: {}     
 };
 
-// Helper function to safely backfill any missing data before sending to Roblox
+// HELPER: Forces Roblox's ambiguous tables into strict Javascript Arrays
+function ensureArray(val) {
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'object' && val !== null) return Object.values(val);
+    return [];
+}
+
+// HELPER: Forces Roblox's ambiguous tables into strict Javascript Objects/Dictionaries
+function ensureObject(val) {
+    if (typeof val === 'object' && val !== null && !Array.isArray(val)) return val;
+    if (Array.isArray(val) && val.length === 0) return {}; 
+    return {};
+}
+
+// Helper function to safely backfill and structure any missing data
 function sanitizeSaveData(rawData) {
+    if (!rawData || typeof rawData !== 'object') {
+        rawData = {};
+    }
+
     const safeData = { ...defaultTemplate, ...rawData };
 
     safeData.attributes = {
@@ -69,19 +88,18 @@ function sanitizeSaveData(rawData) {
     };
 
     safeData.traits = {
-        boons: rawData.traits && rawData.traits.boons ? rawData.traits.boons : {},
-        flaws: rawData.traits && rawData.traits.flaws ? rawData.traits.flaws : {},
-        ...(rawData.traits || {})
+        boons: rawData.traits ? ensureArray(rawData.traits.boons) : [],
+        flaws: rawData.traits ? ensureArray(rawData.traits.flaws) : []
     };
 
-    if (!Array.isArray(safeData.skins)) {
-        safeData.skins = [];
-    }
+    safeData.skins = ensureArray(safeData.skins);
+    safeData.equipped_emotes = ensureObject(safeData.equipped_emotes);
+    safeData.owned_emotes = ensureObject(safeData.owned_emotes);
 
     return safeData;
 }
 
-// Decompresses, updates missing fields, and re-compresses the save
+// Decompresses, updates missing fields, and re-compresses the save ON THE FLY
 function processAndSanitizeSave(base64Save) {
     try {
         const compressedBuffer = Buffer.from(base64Save, 'base64');
@@ -96,7 +114,8 @@ function processAndSanitizeSave(base64Save) {
         const sanitizedData = sanitizeSaveData(parsedData);
         
         const sanitizedJson = JSON.stringify(sanitizedData);
-        const recompressedBuffer = zlib.deflateSync(Buffer.from(sanitizedJson, 'utf8'));
+        // Explicitly compress back using level 9 to perfectly match your Luau Zlib config
+        const recompressedBuffer = zlib.deflateSync(Buffer.from(sanitizedJson, 'utf8'), { level: 9 });
 
         return recompressedBuffer.toString('base64');
     } catch (e) {
@@ -144,7 +163,7 @@ app.post('/', async (req, res) => {
         try {
             const playerData = await savesCollection.findOne({ _id: userId });
             if (playerData && playerData.encodedSave) {
-                // Run the sanitization/backfill process on the saved string before sending it
+                // We sanitize the data here on its way BACK to Roblox, keeping the raw database pristine.
                 const sanitizedSave = processAndSanitizeSave(playerData.encodedSave);
                 return res.status(200).send(JSON.stringify({ response: true, data: sanitizedSave }));
             } else {
