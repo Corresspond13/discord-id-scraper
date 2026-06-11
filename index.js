@@ -3,8 +3,16 @@ const { MongoClient } = require('mongodb');
 
 const app = express();
 
-// Parse any incoming payload format from Roblox without filtering
-app.use(express.text({ type: '*/*', limit: '10mb' })); 
+// FORCE EXPRESS TO READ EVERYTHING AS RAW UNFILTERED TEXT
+app.use((req, res, next) => {
+    let data = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { data += chunk; });
+    req.on('end', () => {
+        req.body = data;
+        next();
+    });
+});
 
 const mongoUri = process.env.MONGO_URI;
 if (!mongoUri) {
@@ -33,7 +41,8 @@ app.post('/', async (req, res) => {
 
     // 1. Handle Ping Action
     if (action === 'ping') {
-        return res.status(200).json({ response: true, message: "pong" });
+        // Must send back a string status so Luau's PostAsync pcall registers true
+        return res.status(200).send(JSON.stringify({ response: true, message: "pong" }));
     }
 
     if (!containerRaw) {
@@ -60,14 +69,14 @@ app.post('/', async (req, res) => {
         try {
             const playerData = await savesCollection.findOne({ _id: userId });
             if (playerData && playerData.encodedSave) {
-                // Return data wrapped exactly how your unedited Luau script expects it
-                return res.json({ response: true, data: playerData.encodedSave });
+                // Returns a clean string payload block back to Luau
+                return res.status(200).send(JSON.stringify({ response: true, data: playerData.encodedSave }));
             } else {
-                return res.json({ response: false });
+                return res.status(200).send(JSON.stringify({ response: false }));
             }
         } catch (error) {
             console.error("Database read failed:", error);
-            return res.status(500).json({ response: false, error: "Internal read error" });
+            return res.status(500).send(JSON.stringify({ response: false, error: "Internal read error" }));
         }
     }
 
@@ -80,12 +89,11 @@ app.post('/', async (req, res) => {
             return res.status(400).send("Empty payload body");
         }
 
-        // FIXED: If Luau wrapped the data in extra JSON quotes, parse it back to a clean string
+        // Clean extra escaping JSON quotes injected by your unedited Luau script
         if (encodedSaveData.startsWith('"') && encodedSaveData.endsWith('"')) {
             try {
                 encodedSaveData = JSON.parse(encodedSaveData);
             } catch (e) {
-                // Fallback to manual string trimming if JSON format is complex
                 encodedSaveData = encodedSaveData.slice(1, -1);
             }
         }
@@ -97,10 +105,12 @@ app.post('/', async (req, res) => {
                 { upsert: true }
             );
             console.log(`Successfully saved data document for user: ${userId}`);
-            return res.json({ response: true });
+            
+            // Your Luau code validates a successful transmission by decoding the data response string!
+            return res.status(200).send(JSON.stringify({ response: true }));
         } catch (error) {
             console.error("Database update failed:", error);
-            return res.status(500).json({ response: false, error: "Internal save error" });
+            return res.status(500).send(JSON.stringify({ response: false, error: "Internal save error" }));
         }
     }
 
