@@ -1,6 +1,6 @@
 const express = require('express');
 const { MongoClient } = require('mongodb');
-const zlib = require('zlib'); // Import the built-in decompression module
+const zlib = require('zlib');
 
 const app = express();
 
@@ -36,6 +36,75 @@ async function connectDB() {
 }
 connectDB();
 
+// Default safe template to merge into incoming data
+const defaultTemplate = {
+    shards: 0,
+    cash: 0,
+    bank: 0,
+    level: 1,
+    xp: 0,
+    reputation: 0,
+    attributes: {
+        strength: 0,
+        endurance: 0,
+        agility: 0,
+        altruism: 0
+    },
+    traits: {
+        boons: {},
+        flaws: {}
+    },
+    equipped_emotes: {},
+    owned_emotes: {},
+    skins: []
+};
+
+// Helper function to safely backfill any missing data before sending to Roblox
+function sanitizeSaveData(rawData) {
+    const safeData = { ...defaultTemplate, ...rawData };
+
+    safeData.attributes = {
+        ...defaultTemplate.attributes,
+        ...(rawData.attributes || {})
+    };
+
+    safeData.traits = {
+        boons: rawData.traits && rawData.traits.boons ? rawData.traits.boons : {},
+        flaws: rawData.traits && rawData.traits.flaws ? rawData.traits.flaws : {},
+        ...(rawData.traits || {})
+    };
+
+    if (!Array.isArray(safeData.skins)) {
+        safeData.skins = [];
+    }
+
+    return safeData;
+}
+
+// Decompresses, updates missing fields, and re-compresses the save
+function processAndSanitizeSave(base64Save) {
+    try {
+        const compressedBuffer = Buffer.from(base64Save, 'base64');
+        let decompressedString;
+        try {
+            decompressedString = zlib.inflateSync(compressedBuffer).toString('utf8');
+        } catch (err) {
+            decompressedString = zlib.inflateRawSync(compressedBuffer).toString('utf8');
+        }
+
+        const parsedData = JSON.parse(decompressedString);
+        const sanitizedData = sanitizeSaveData(parsedData);
+        
+        const sanitizedJson = JSON.stringify(sanitizedData);
+        const recompressedBuffer = zlib.deflateSync(Buffer.from(sanitizedJson, 'utf8'));
+
+        return recompressedBuffer.toString('base64');
+    } catch (e) {
+        console.error("Pipeline failed to sanitize save, returning original raw payload:", e);
+        return base64Save; 
+    }
+}
+
 app.post('/', async (req, res) => {
     const action = req.headers['action'];
     const containerRaw = req.headers['container'];
@@ -54,13 +123,11 @@ app.post('/', async (req, res) => {
         if (containerRaw.startsWith("{")) {
             userId = JSON.parse(containerRaw).user;
         } else {
-            // Decode Base64, then inflate the Zlib compressed buffer
             const compressedBuffer = Buffer.from(containerRaw, 'base64');
             let decompressed;
             try {
                 decompressed = zlib.inflateSync(compressedBuffer).toString('utf8');
             } catch (err) {
-                // Fallback to raw inflate if the standard Zlib header is missing
                 decompressed = zlib.inflateRawSync(compressedBuffer).toString('utf8');
             }
             userId = JSON.parse(decompressed).user;
@@ -77,7 +144,9 @@ app.post('/', async (req, res) => {
         try {
             const playerData = await savesCollection.findOne({ _id: userId });
             if (playerData && playerData.encodedSave) {
-                return res.status(200).send(JSON.stringify({ response: true, data: playerData.encodedSave }));
+                // Run the sanitization/backfill process on the saved string before sending it
+                const sanitizedSave = processAndSanitizeSave(playerData.encodedSave);
+                return res.status(200).send(JSON.stringify({ response: true, data: sanitizedSave }));
             } else {
                 return res.status(200).send(JSON.stringify({ response: false }));
             }
@@ -96,7 +165,6 @@ app.post('/', async (req, res) => {
             return res.status(400).send("Empty payload body");
         }
 
-        // Clean extra escaping JSON quotes injected by your Luau script
         if (encodedSaveData.startsWith('"') && encodedSaveData.endsWith('"')) {
             try {
                 encodedSaveData = JSON.parse(encodedSaveData);
