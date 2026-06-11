@@ -2,8 +2,9 @@ const express = require('express');
 const { MongoClient } = require('mongodb');
 
 const app = express();
-// Allows the API to parse raw text payloads up to 10MB (since your Roblox data is zlib/base64 compressed)
-app.use(express.text({ limit: '10mb' })); 
+
+// FIXED: Added type: '*/*' to capture the compressed Roblox string block regardless of what Content-Type Roblox sends
+app.use(express.text({ type: '*/*', limit: '10mb' })); 
 
 const mongoUri = process.env.MONGO_URI;
 if (!mongoUri) {
@@ -44,7 +45,6 @@ app.post('/', async (req, res) => {
     
     let userId;
     try {
-        // Safe processing of the Roblox container block to isolate the UserId string
         if (containerRaw.startsWith("{")) {
             userId = JSON.parse(containerRaw).user;
         } else {
@@ -56,7 +56,6 @@ app.post('/', async (req, res) => {
         return res.status(400).send("Invalid container data structure");
     }
 
-    // Ensure userId is handled safely as a uniform string layout
     userId = String(userId);
 
     // 2. Handle Get (Load Data) Action
@@ -76,9 +75,10 @@ app.post('/', async (req, res) => {
 
     // 3. Handle Save Data Action
     if (action === 'save') {
-        const encodedSaveData = req.body; // Raw compressed payload string block from Roblox
+        const encodedSaveData = req.body; // Captured raw text payload string block
         
         if (!encodedSaveData || encodedSaveData.trim() === "") {
+            console.error("Save failed: Payload body was empty!");
             return res.status(400).send("Empty payload body");
         }
 
@@ -88,6 +88,7 @@ app.post('/', async (req, res) => {
                 { $set: { encodedSave: encodedSaveData, updatedAt: new Date() } },
                 { upsert: true }
             );
+            console.log(`Successfully saved data document for user: ${userId}`);
             return res.json({ response: true });
         } catch (error) {
             console.error("Database upsert update failed:", error);
@@ -98,6 +99,5 @@ app.post('/', async (req, res) => {
     return res.status(400).send("Unknown action value passed");
 });
 
-// Render configures the PORT variable automatically
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Roblox Database Bridge running on port ${PORT}`));
